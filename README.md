@@ -2,6 +2,8 @@
 
 TCP Butler is a Go helper for building request/response style protocols on top of raw TCP sessions.
 
+![TCP Butler overview](doc/diagram.png)
+
 ## Overview
 
 The library exposes a `manager` that owns a pool of TCP sessions (either outbound via `NewClientManager` or inbound via `NewServerManager`). It handles:
