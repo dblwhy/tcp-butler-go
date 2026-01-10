@@ -144,7 +144,7 @@ func newTestManagerWithSessions(t *testing.T, sessionOps []SessionOptions, opts 
 			t.Fatalf("session %d failed to start: %v", idx, err)
 		}
 		mgr.addSession(session)
-		mgr.watchSession(session)
+		mgr.watchSession(session, nil)
 	}
 
 	return mgr

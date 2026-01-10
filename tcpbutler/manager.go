@@ -92,6 +92,12 @@ type ClientEndpoint struct {
 	NumSessions int
 }
 
+type reconnectConfig struct {
+	ctx     context.Context
+	dial    DialFunc
+	decoder Decoder
+}
+
 func NewClientManager(
 	ctx context.Context,
 	endpoints []ClientEndpoint,
@@ -299,15 +305,12 @@ func (m *manager) dialLoop(ctx context.Context, dial DialFunc, decoder Decoder) 
 		}
 
 		m.addSession(session)
-
-		select {
-		case <-ctx.Done():
-			session.Close()
-			m.removeSession(session)
-			return
-		case <-session.Done():
-			m.removeSession(session)
-		}
+		m.watchSession(session, &reconnectConfig{
+			ctx:     ctx,
+			dial:    dial,
+			decoder: decoder,
+		})
+		return
 	}
 }
 
@@ -338,7 +341,7 @@ func (m *manager) acceptLoop(ctx context.Context, ln net.Listener, decoder Decod
 		}
 
 		m.addSession(session)
-		m.watchSession(session)
+		m.watchSession(session, nil)
 	}
 }
 
@@ -434,26 +437,17 @@ func (m *manager) addListener(ln net.Listener) {
 	m.listenersMu.Unlock()
 }
 
-func (m *manager) watchSession(session *Session) {
+func (m *manager) watchSession(session *Session, reconnect *reconnectConfig) {
 	go func() {
 		<-session.Done()
 		m.removeSession(session)
+
+		if reconnect == nil {
+			return
+		}
+		if reconnect.ctx == nil || reconnect.ctx.Err() != nil {
+			return
+		}
+		go m.dialLoop(reconnect.ctx, reconnect.dial, reconnect.decoder)
 	}()
 }
-
-// func (e *Endpoint) startReconnectLoop(dial DialFunc) {
-//     go func() {
-//         for {
-//             // if we have fewer than desired sessions
-//             if e.sessionCount() < e.desiredSessions {
-//                 conn, err := dial(context.Background())
-//                 if err != nil {
-//                     time.Sleep(backoffDuration)
-//                     continue
-//                 }
-//                 e.addSession(conn)
-//             }
-//             time.Sleep(time.Second)
-//         }
-//     }()
-// }
