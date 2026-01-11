@@ -37,7 +37,9 @@ package main
 
 import (
     "context"
-    "log"
+	"log"
+	"log/slog"
+
     "github.com/you/tcpbutler"
 )
 
@@ -50,7 +52,9 @@ func main() {
         return msg, nil // echo response
     }
 
-    if err := tcpbutler.ListenAndServe(ctx, ":9000", decoder, handler); err != nil {
+    logger := tcpbutler.NewSlogLoggerJSON(slog.LevelDebug)
+
+    if err := tcpbutler.ListenAndServe(ctx, ":9000", decoder, handler, tcpbutler.WithLogger(logger)); err != nil {
         log.Fatal(err)
     }
 }
