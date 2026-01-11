@@ -72,6 +72,6 @@ func Serve(
 	<-ctx.Done()
 
 	// Attempt graceful shutdown.
-	_ = m.CloseAll()
+	_ = m.CloseGracefully()
 	return ctx.Err()
 }

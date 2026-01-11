@@ -168,7 +168,7 @@ func TestManager_SendAndWait(t *testing.T) {
 	}
 
 	mgr := newTestManagerWithSessions(t, sessionOps)
-	defer mgr.CloseAll()
+	defer mgr.CloseGracefully()
 
 	// Give sessions time to start
 	time.Sleep(50 * time.Millisecond)
@@ -211,7 +211,7 @@ func TestManager_SendAndWait_Timeout(t *testing.T) {
 	}
 
 	mgr := newTestManagerWithSessions(t, sessionOps)
-	defer mgr.CloseAll()
+	defer mgr.CloseGracefully()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -286,7 +286,7 @@ func TestManager_SendNoWait(t *testing.T) {
 	}
 
 	mgr := newTestManagerWithSessions(t, sessionOps)
-	defer mgr.CloseAll()
+	defer mgr.CloseGracefully()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -355,7 +355,7 @@ func TestManager_InboundHandler(t *testing.T) {
 		return nil, nil // No response needed
 	})
 
-	defer mgr.CloseAll()
+	defer mgr.CloseGracefully()
 
 	// Wait for server message and handler
 	time.Sleep(300 * time.Millisecond)
@@ -394,7 +394,7 @@ func TestManager_ConcurrentRequests(t *testing.T) {
 	}
 
 	mgr := newTestManagerWithSessions(t, sessionOps)
-	defer mgr.CloseAll()
+	defer mgr.CloseGracefully()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -471,7 +471,7 @@ func TestManager_SessionManagement(t *testing.T) {
 	}
 
 	// Close all sessions
-	err := mgr.CloseAll()
+	err := mgr.CloseGracefully()
 	if err != nil {
 		t.Errorf("Failed to close all sessions: %v", err)
 	}
@@ -527,7 +527,7 @@ func TestManager_InboundHandlerWithResponse(t *testing.T) {
 		}, nil
 	})
 
-	defer mgr.CloseAll()
+	defer mgr.CloseGracefully()
 
 	// Wait for interaction
 	time.Sleep(500 * time.Millisecond)

@@ -27,18 +27,20 @@ var (
 type ManagerOption func(*managerOptions)
 
 type managerOptions struct {
-	outboundBuffer int
-	maxDialBackoff time.Duration
-	requestTimeout time.Duration
-	logger         Logger
+	outboundBuffer  int
+	maxDialBackoff  time.Duration
+	requestTimeout  time.Duration
+	logger          Logger
+	gracefulTimeout time.Duration
 }
 
 func defaultManagerOptions() managerOptions {
 	return managerOptions{
-		outboundBuffer: defaultOutboundBuffer,
-		maxDialBackoff: defaultMaxDialBackoff,
-		requestTimeout: defaultRequestTimeout,
-		logger:         NopLogger{},
+		outboundBuffer:  defaultOutboundBuffer,
+		maxDialBackoff:  defaultMaxDialBackoff,
+		requestTimeout:  defaultRequestTimeout,
+		logger:          NopLogger{},
+		gracefulTimeout: 10 * time.Second,
 	}
 }
 
@@ -74,6 +76,14 @@ func WithLogger(logger Logger) ManagerOption {
 	}
 }
 
+func WithGracefulShutdownTimeout(d time.Duration) ManagerOption {
+	return func(cfg *managerOptions) {
+		if d >= 0 {
+			cfg.gracefulTimeout = d
+		}
+	}
+}
+
 // ===== Types =====
 
 type manager struct {
@@ -92,8 +102,7 @@ type manager struct {
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 
-	cfg managerOptions
-
+	cfg    managerOptions
 	logger Logger
 
 	sessionCursor uint64
@@ -130,7 +139,7 @@ func NewClientManager(
 	clientCtx, cancel := context.WithCancel(ctx)
 	m := newManager(opts...)
 	m.cancel = cancel
-	m.logger.Info("starting client manager with %d endpoints", len(endpoints))
+	m.logger.Info("establishing persistent TCP sessions", "endpoints_count", len(endpoints))
 
 	for idx, ep := range endpoints {
 		if ep.Dial == nil {
@@ -143,7 +152,6 @@ func NewClientManager(
 		if numSessions <= 0 {
 			numSessions = 1
 		}
-		m.logger.Info("endpoint %d configured with %d session(s)", idx, numSessions)
 		for i := 0; i < numSessions; i++ {
 			go m.dialLoop(clientCtx, ep.Dial, ep.Decoder)
 		}
@@ -169,7 +177,7 @@ func NewServerManager(ctx context.Context, ln net.Listener, decoder Decoder, opt
 	m.cancel = cancel
 	m.addListener(ln)
 
-	m.logger.Info("starting server manager on %s", ln.Addr())
+	m.logger.Info("starting server manager", "address", ln.Addr().String())
 	go m.acceptLoop(serverCtx, ln, decoder)
 
 	return m, nil
@@ -214,28 +222,29 @@ func (m *manager) Listeners() []net.Listener {
 	return cp
 }
 
-func (m *manager) CloseAll() error {
-	m.closeOnce.Do(func() {
-		if m.cancel != nil {
-			m.cancel() // triggers ctx.Done() in acceptLoop / dialLoop contexts
+// ForceCloseAll immediately closes all listeners and sessions.
+func (m *manager) ForceCloseAll() error {
+	m.shutdownManagerContext()
+	m.closeListeners()
+	m.closeSessions()
+	return nil
+}
+
+// CloseGracefully waits for inflight requests to drain before closing sessions.
+func (m *manager) CloseGracefully() error {
+	m.shutdownManagerContext()
+	m.closeListeners()
+	if atomic.LoadInt64(&m.inflightCount) > 0 {
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), m.cfg.gracefulTimeout)
+		defer waitCancel()
+
+		m.logger.Info("waiting for inflight requests to drain", "inflight_count", atomic.LoadInt64(&m.inflightCount))
+		if err := m.waitForInflight(waitCtx); err != nil {
+			m.logger.Warn("timeout while waiting for inflight", "err", err,
+				"inflight_count", atomic.LoadInt64(&m.inflightCount))
 		}
-	})
-
-	m.logger.Info("closing all sessions (%d) and listeners (%d)", len(m.Sessions()), len(m.Listeners()))
-	for _, session := range m.Sessions() {
-		session.Close()
 	}
-	m.sessionMu.Lock()
-	m.sessions = nil
-	m.sessionMu.Unlock()
-
-	for _, listener := range m.Listeners() {
-		listener.Close()
-	}
-	m.listenersMu.Lock()
-	m.listeners = nil
-	m.listenersMu.Unlock()
-
+	m.closeSessions()
 	return nil
 }
 
@@ -261,7 +270,7 @@ func (m *manager) SendAndWait(ctx context.Context, msg Message) (Message, error)
 	// submit message to appropriate session
 	session, err := m.nextSession()
 	if err != nil {
-		m.logger.Warn("SendAndWait: no session available for corrID=%s", corrID)
+		m.logger.Warn("SendAndWait: no session available for the message", "corrID", corrID)
 		return nil, err
 	}
 
@@ -270,10 +279,10 @@ func (m *manager) SendAndWait(ctx context.Context, msg Message) (Message, error)
 	case session.outCh <- msg:
 		// ok
 	case <-session.Done():
-		m.logger.Warn("SendAndWait: session closed before send corrID=%s", corrID)
+		m.logger.Warn("SendAndWait: session closed before send", "corrID", corrID)
 		return nil, ErrSendFailed
 	case <-ctx.Done():
-		m.logger.Warn("SendAndWait: context done before send corrID=%s", corrID)
+		m.logger.Warn("SendAndWait: context done before send", "corrID", corrID)
 		return nil, ctx.Err()
 	}
 
@@ -288,7 +297,7 @@ func (m *manager) SendAndWait(ctx context.Context, msg Message) (Message, error)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-timer.C:
-		m.logger.Warn("SendAndWait: timeout waiting for corrID=%s", corrID)
+		m.logger.Warn("SendAndWait: timeout waiting", "corrID", corrID)
 		return nil, fmt.Errorf("timeout waiting for response")
 	}
 }
@@ -301,7 +310,7 @@ func (m *manager) SendNoWait(ctx context.Context, msg Message) error {
 
 	session, err := m.nextSession()
 	if err != nil {
-		m.logger.Warn("SendNoWait: no session available for corrID=%s", msg.CorrelationID())
+		m.logger.Warn("SendNoWait: no session available", "corrID", msg.CorrelationID())
 		return err
 	}
 
@@ -309,10 +318,10 @@ func (m *manager) SendNoWait(ctx context.Context, msg Message) error {
 	case session.outCh <- msg:
 		return nil
 	case <-session.Done():
-		m.logger.Warn("SendNoWait: session closed before send corrID=%s", msg.CorrelationID())
+		m.logger.Warn("SendNoWait: session closed before send", "corrID", msg.CorrelationID())
 		return ErrSendFailed
 	case <-ctx.Done():
-		m.logger.Warn("SendNoWait: context done before send corrID=%s", msg.CorrelationID())
+		m.logger.Warn("SendNoWait: context done before send", "corrID", msg.CorrelationID())
 		return ctx.Err()
 	}
 }
@@ -331,7 +340,7 @@ func (m *manager) dialLoop(ctx context.Context, dial DialFunc, decoder Decoder) 
 
 		conn, err := dial(ctx)
 		if err != nil {
-			m.logger.Warn("dial failed: %v", err)
+			m.logger.Warn("dial failed", "error", err)
 			if !waitWithContext(ctx, backoff) {
 				return
 			}
@@ -339,7 +348,7 @@ func (m *manager) dialLoop(ctx context.Context, dial DialFunc, decoder Decoder) 
 			continue
 		}
 		backoff = time.Second
-		m.logger.Info("dial succeeded to %s", conn.RemoteAddr())
+		m.logger.Info("dial succeeded", "address", conn.RemoteAddr())
 
 		session := NewSession(SessionOptions{
 			Conn:           conn,
@@ -347,9 +356,10 @@ func (m *manager) dialLoop(ctx context.Context, dial DialFunc, decoder Decoder) 
 			OutboundBuffer: m.cfg.outboundBuffer,
 		}, m.onInboundMessage)
 		session.log = m.logger
+		session.log = m.logger
 		if err := session.Start(ctx); err != nil {
 			conn.Close()
-			m.logger.Warn("failed to start session: %v", err)
+			m.logger.Warn("failed to start session", "error", err)
 			if !waitWithContext(ctx, backoff) {
 				return
 			}
@@ -378,7 +388,7 @@ func (m *manager) acceptLoop(ctx context.Context, ln net.Listener, decoder Decod
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
-			m.logger.Warn("accept failed: %v", err)
+			m.logger.Warn("accept failed", "error", err)
 			if !waitWithContext(ctx, acceptRetryDelay) {
 				return
 			}
@@ -392,7 +402,7 @@ func (m *manager) acceptLoop(ctx context.Context, ln net.Listener, decoder Decod
 		}, m.onInboundMessage)
 		if err := session.Start(ctx); err != nil {
 			conn.Close()
-			m.logger.Warn("failed to start accepted session: %v", err)
+			m.logger.Warn("failed to start accepted session", "error", err)
 			continue
 		}
 
@@ -412,8 +422,7 @@ func (m *manager) onInboundMessage(sess *Session, msg Message) {
 		case ch <- msg:
 			// delivered
 		default:
-			// receiver too slow or gone; you can log and drop
-			m.logger.Warn("inflight channel full for corrID=%s, dropping", corrID)
+			m.logger.Warn("inflight channel full, dropping message", "corrID", corrID)
 		}
 		return
 	}
@@ -425,7 +434,7 @@ func (m *manager) onInboundMessage(sess *Session, msg Message) {
 func (m *manager) handleInboundRequest(sess *Session, req Message) {
 	val := m.inboundHandler.Load()
 	if val == nil {
-		m.logger.Warn("dropping inbound message with no handler corrID=%s", req.CorrelationID())
+		m.logger.Warn("dropping inbound message with no handler", "corrID", req.CorrelationID())
 		return
 	}
 	handler := val.(InboundHandler)
@@ -437,7 +446,7 @@ func (m *manager) handleInboundRequest(sess *Session, req Message) {
 
 		resp, err := handler(ctx, req)
 		if err != nil {
-			m.logger.Error("inbound handler error: %v", err)
+			m.logger.Error("inbound handler error", "error", err)
 			return
 		}
 		if resp == nil {
@@ -450,7 +459,7 @@ func (m *manager) handleInboundRequest(sess *Session, req Message) {
 			// ok
 		case <-sess.Done():
 			// session closed before we could respond
-			m.logger.Warn("session closed before responding to inbound corrID=%s", req.CorrelationID())
+			m.logger.Warn("session closed before responding to inbound", "corrID", req.CorrelationID())
 		}
 	}(m.cfg.requestTimeout)
 }
@@ -510,7 +519,7 @@ func (m *manager) watchSession(session *Session, reconnect *reconnectConfig) {
 	go func() {
 		<-session.Done()
 		m.removeSession(session)
-		m.logger.Info("session closed: %p", session)
+		m.logger.Info("session closed", "session", session)
 
 		if reconnect == nil {
 			return
@@ -521,4 +530,59 @@ func (m *manager) watchSession(session *Session, reconnect *reconnectConfig) {
 		m.logger.Info("attempting reconnect for session slot")
 		go m.dialLoop(reconnect.ctx, reconnect.dial, reconnect.decoder)
 	}()
+}
+
+func (m *manager) shutdownManagerContext() {
+	m.closeOnce.Do(func() {
+		if m.cancel != nil {
+			m.cancel()
+		}
+	})
+}
+
+func (m *manager) closeSessions() {
+	sessions := m.Sessions()
+	if len(sessions) == 0 {
+		return
+	}
+	m.logger.Info("closing all sessions", "sessions_count", len(sessions))
+
+	for _, session := range sessions {
+		session.Close()
+	}
+	m.sessionMu.Lock()
+	m.sessions = nil
+	m.sessionMu.Unlock()
+}
+
+// closeListeners closes all listeners. This only blocks establishing new tcp sessions and will not close existing sessions.
+func (m *manager) closeListeners() {
+	listeners := m.Listeners()
+	if len(listeners) == 0 {
+		return
+	}
+	m.logger.Info("closing all listeners", "listeners_count", len(listeners))
+
+	for _, ln := range listeners {
+		ln.Close()
+	}
+	m.listenersMu.Lock()
+	m.listeners = nil
+	m.listenersMu.Unlock()
+}
+
+func (m *manager) waitForInflight(ctx context.Context) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if atomic.LoadInt64(&m.inflightCount) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done(): // timeout
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }

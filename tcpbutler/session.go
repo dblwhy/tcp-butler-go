@@ -39,7 +39,7 @@ type Session struct {
 
 	inboundHandler func(*Session, Message)
 
-	log Logger
+	logger Logger
 
 	closeOnce sync.Once
 }
@@ -84,13 +84,13 @@ func (s *Session) writeLoop() {
 
 			payload, err := msg.Encode()
 			if err != nil {
-				// log, maybe notify mgr
+				s.logger.Warn("failed to encode outbound message", "error", err)
 				continue
 			}
 
 			// simple write; in production you may need framing, TLS error handling, etc.
 			if _, err := s.conn.Write(payload); err != nil {
-				// log + maybe tell manager this session is broken
+				s.logger.Error("write failed", "error", err)
 				return
 			}
 		}
@@ -103,7 +103,7 @@ func (s *Session) readLoop() {
 	for {
 		msg, err := s.decoder.Decode(s.conn)
 		if err != nil {
-			// log + notify manager session is dead if needed
+			s.logger.Warn("read failed", "error", err)
 			return
 		}
 		s.inboundHandler(s, msg)
@@ -117,6 +117,11 @@ func (s *Session) Close() error {
 		close(s.done)
 		if s.conn != nil {
 			err = s.conn.Close()
+			if err != nil {
+				s.logger.Info("close error", "error", err)
+			} else {
+				s.logger.Info("session closed")
+			}
 		}
 	})
 

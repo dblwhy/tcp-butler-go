@@ -4,6 +4,16 @@ Persistent TCP sessions made simple — reconnect, pooling, request/response, pu
 
 ![TCP Butler overview](doc/diagram.png)
 
+## Status
+
+This project is still in **experimental** stage (2026/1/11).
+
+Roadmap
+- [ ] Logging interface (in progress)
+- [ ] Graceful shutdown
+    - how to ensure graceful shutdown for persisted tcp connection? can we prevent a case like we need to force close tcp session (reach graceful timeout) before all the inflight request completes?
+- [ ] Add unit tests
+
 ## ✨ Features
 - Persistent TCP sessions (pooled)
 - Automatic reconnect (exponential backoff)
@@ -67,7 +77,7 @@ if err != nil { panic(err) }
 m.SetInboundHandler(handler)
 
 <-ctx.Done()
-m.CloseAll()
+m.CloseGracefully()
 ```
 
 ## TCP Client Mode
@@ -120,6 +130,7 @@ resp, err := cli.SendAndWait(ctx, request)
 | `WithOutboundBuffer(size)` | Size of per-session outbound channel (default 100). |
 | `WithMaxDialBackoff(d)` | Maximum reconnect backoff (default 30s). |
 | `WithRequestTimeout(d)` | `SendAndWait` timeout before failing (default 5s). |
+| `WithLogger(logger)` | Plug in a custom logger (defaults to no-op). |
 
 Pass these options to both `NewClientManager` and `NewServerManager` to tailor behavior per deployment.
 
