@@ -254,6 +254,24 @@ func (m *manager) SendAndWait(ctx context.Context, msg Message) (Message, error)
 		ctx = context.Background()
 	}
 
+	// submit message to appropriate session
+	session, err := m.nextSession()
+	if err != nil {
+		return nil, err
+	}
+
+	return m.SendAndWaitOnSession(ctx, session, msg)
+}
+
+// SendAndWaitOnSession sends a message on the provided session and waits for the response.
+func (m *manager) SendAndWaitOnSession(ctx context.Context, session *Session, msg Message) (Message, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if session == nil {
+		return nil, ErrNoSessions
+	}
+
 	corrID := msg.CorrelationID()
 	inCh := make(chan Message, 1)
 
@@ -266,13 +284,6 @@ func (m *manager) SendAndWait(ctx context.Context, msg Message) (Message, error)
 		m.inflight.Delete(corrID)
 		atomic.AddInt64(&m.inflightCount, -1)
 	}()
-
-	// submit message to appropriate session
-	session, err := m.nextSession()
-	if err != nil {
-		m.logger.Warn("SendAndWait: no session available for the message", "corrID", corrID)
-		return nil, err
-	}
 
 	// enqueue outbound
 	select {
@@ -312,6 +323,18 @@ func (m *manager) SendNoWait(ctx context.Context, msg Message) error {
 	if err != nil {
 		m.logger.Warn("SendNoWait: no session available", "corrID", msg.CorrelationID())
 		return err
+	}
+
+	return m.SendNoWaitOnSession(ctx, session, msg)
+}
+
+// SendNoWaitOnSession sends a message on the specified session without waiting for a response.
+func (m *manager) SendNoWaitOnSession(ctx context.Context, session *Session, msg Message) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if session == nil {
+		return ErrNoSessions
 	}
 
 	select {
