@@ -101,7 +101,7 @@ cli, err := tcpbutler.DialTLS(ctx, "tcp", "example.com:443", tlsConf, decoder, 4
 
 ```go
 handler := func(ctx context.Context, msg tcpbutler.Message) (tcpbutler.Message, error) {
-    log.Println("server received:", msg)
+    log.Println("received:", msg)
     return msg, nil // echo response
 }
 
