@@ -34,6 +34,10 @@ type Session struct {
 	conn    net.Conn
 	decoder Decoder
 
+	// Benefit of having queue
+	// - there is always one writer to the TCP socket even receive multiple requests in parallel
+	// - can control queue size and return custom error like: ErrBackPressure
+	// - can make request async and return fast even network is slow
 	outCh chan Message
 	done  chan struct{}
 
