@@ -139,7 +139,7 @@ func newTestManagerWithSessions(t *testing.T, sessionOps []SessionOptions, opts 
 	mgr := newManager(opts...)
 
 	for idx, sessionOp := range sessionOps {
-		session := NewSession(sessionOp, mgr.onInboundMessage)
+		session := NewSession(NopLogger{}, sessionOp, mgr.onInboundMessage)
 		if err := session.Start(context.Background()); err != nil {
 			t.Fatalf("session %d failed to start: %v", idx, err)
 		}

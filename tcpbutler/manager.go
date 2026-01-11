@@ -350,13 +350,11 @@ func (m *manager) dialLoop(ctx context.Context, dial DialFunc, decoder Decoder) 
 		backoff = time.Second
 		m.logger.Info("dial succeeded", "address", conn.RemoteAddr())
 
-		session := NewSession(SessionOptions{
+		session := NewSession(m.logger, SessionOptions{
 			Conn:           conn,
 			Decoder:        decoder,
 			OutboundBuffer: m.cfg.outboundBuffer,
 		}, m.onInboundMessage)
-		session.log = m.logger
-		session.log = m.logger
 		if err := session.Start(ctx); err != nil {
 			conn.Close()
 			m.logger.Warn("failed to start session", "error", err)
@@ -395,7 +393,7 @@ func (m *manager) acceptLoop(ctx context.Context, ln net.Listener, decoder Decod
 			continue
 		}
 
-		session := NewSession(SessionOptions{
+		session := NewSession(m.logger, SessionOptions{
 			Conn:           conn,
 			Decoder:        decoder,
 			OutboundBuffer: m.cfg.outboundBuffer,

@@ -44,13 +44,14 @@ type Session struct {
 	closeOnce sync.Once
 }
 
-func NewSession(options SessionOptions, inboundHandler func(*Session, Message)) *Session {
+func NewSession(logger Logger, options SessionOptions, inboundHandler func(*Session, Message)) *Session {
 	buffer := options.OutboundBuffer
 	if buffer <= 0 {
 		buffer = defaultOutboundBuffer
 	}
 
 	return &Session{
+		logger:         logger,
 		conn:           options.Conn,
 		decoder:        options.Decoder,
 		inboundHandler: inboundHandler,
