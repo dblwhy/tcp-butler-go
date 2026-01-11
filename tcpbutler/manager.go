@@ -22,6 +22,8 @@ var (
 	ErrNoSessions = fmt.Errorf("no active sessions available")
 )
 
+// ===== Manager options =====
+
 type ManagerOption func(*managerOptions)
 
 type managerOptions struct {
@@ -62,16 +64,17 @@ func WithRequestTimeout(d time.Duration) ManagerOption {
 	}
 }
 
-type InboundHandler func(ctx context.Context, message Message) (resp Message, err error)
+// ===== Types =====
 
 type manager struct {
-	inflight      sync.Map // making inflight global because responses could come back on any open session (rare though)
+	// inflight responses are keyed by correlation ID so any session can deliver
+	inflight      sync.Map // map[CorrelationID]chan Message
 	inflightCount int64    // for drain / metrics
 
 	sessions  []*Session
 	sessionMu sync.RWMutex
 
-	inboundHandler atomic.Value
+	inboundHandler atomic.Value // stores InboundHandler
 
 	listeners   []net.Listener
 	listenersMu sync.Mutex
@@ -97,6 +100,8 @@ type reconnectConfig struct {
 	dial    DialFunc
 	decoder Decoder
 }
+
+// ===== Constructors (fine-grained control) =====
 
 func NewClientManager(
 	ctx context.Context,
@@ -167,6 +172,8 @@ func newManager(opts ...ManagerOption) *manager {
 	}
 }
 
+// ===== Public manager API =====
+
 func (m *manager) SetInboundHandler(h InboundHandler) {
 	m.inboundHandler.Store(h)
 }
@@ -175,7 +182,7 @@ func (m *manager) Sessions() []*Session {
 	m.sessionMu.RLock()
 	defer m.sessionMu.RUnlock()
 
-	// prevent from caller to mutate the manager's internal slice but still access to the original sessions
+	// return a copy so caller can't mutate internal slice
 	cp := make([]*Session, len(m.sessions))
 	copy(cp, m.sessions)
 	return cp
@@ -185,6 +192,7 @@ func (m *manager) Listeners() []net.Listener {
 	m.listenersMu.Lock()
 	defer m.listenersMu.Unlock()
 
+	// return a copy so caller can't mutate internal slice
 	cp := make([]net.Listener, len(m.listeners))
 	copy(cp, m.listeners)
 	return cp
@@ -193,7 +201,7 @@ func (m *manager) Listeners() []net.Listener {
 func (m *manager) CloseAll() error {
 	m.closeOnce.Do(func() {
 		if m.cancel != nil {
-			m.cancel() // triggers ctx.Done()
+			m.cancel() // triggers ctx.Done() in acceptLoop / dialLoop contexts
 		}
 	})
 
@@ -214,7 +222,12 @@ func (m *manager) CloseAll() error {
 	return nil
 }
 
+// SendAndWait sends a message and waits for the matching response by CorrelationID.
 func (m *manager) SendAndWait(ctx context.Context, msg Message) (Message, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	corrID := msg.CorrelationID()
 	inCh := make(chan Message, 1)
 
@@ -241,21 +254,30 @@ func (m *manager) SendAndWait(ctx context.Context, msg Message) (Message, error)
 	case <-session.Done():
 		return nil, ErrSendFailed
 	case <-ctx.Done():
-		return nil, ErrSendFailed
+		return nil, ctx.Err()
 	}
 
-	// wait for response or timeout
+	// wait for response, ctx cancel, or timeout
 	timeout := m.cfg.requestTimeout
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case inbound := <-inCh:
 		return inbound, nil
-	case <-time.After(timeout):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
 		return nil, fmt.Errorf("timeout waiting for response")
 	}
 }
 
 // SendNoWait sends a message and does NOT wait for a response.
 func (m *manager) SendNoWait(ctx context.Context, msg Message) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	session, err := m.nextSession()
 	if err != nil {
 		return err
@@ -267,9 +289,11 @@ func (m *manager) SendNoWait(ctx context.Context, msg Message) error {
 	case <-session.Done():
 		return ErrSendFailed
 	case <-ctx.Done():
-		return ErrSendFailed
+		return ctx.Err()
 	}
 }
+
+// ===== Internal loops =====
 
 func (m *manager) dialLoop(ctx context.Context, dial DialFunc, decoder Decoder) {
 	backoff := time.Second
@@ -345,6 +369,8 @@ func (m *manager) acceptLoop(ctx context.Context, ln net.Listener, decoder Decod
 	}
 }
 
+// ===== Inbound handling =====
+
 func (m *manager) onInboundMessage(sess *Session, msg Message) {
 	corrID := msg.CorrelationID()
 
@@ -359,7 +385,7 @@ func (m *manager) onInboundMessage(sess *Session, msg Message) {
 		return
 	}
 
-	// no inflight match: this is server initiated request or unexpected response
+	// no inflight match: this is server-initiated request or unexpected response
 	m.handleInboundRequest(sess, msg)
 }
 
@@ -372,8 +398,8 @@ func (m *manager) handleInboundRequest(sess *Session, req Message) {
 	handler := val.(InboundHandler)
 
 	// Don't block read loop
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	go func(timeout time.Duration) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
 		resp, err := handler(ctx, req)
@@ -385,9 +411,17 @@ func (m *manager) handleInboundRequest(sess *Session, req Message) {
 			// Fire-and-forget inbound: process only, no response
 			return
 		}
-		sess.outCh <- resp
-	}()
+
+		select {
+		case sess.outCh <- resp:
+			// ok
+		case <-sess.Done():
+			// session closed before we could respond
+		}
+	}(m.cfg.requestTimeout)
 }
+
+// ===== Session management =====
 
 func (m *manager) addSession(session *Session) {
 	m.sessionMu.Lock()

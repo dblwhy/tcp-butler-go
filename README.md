@@ -1,60 +1,116 @@
-# TCP Butler
+# TCP-Butler
 
-TCP Butler is a Go helper for building request/response style protocols on top of raw TCP sessions.
+Persistent TCP sessions made simple — reconnect, pooling, request/response, push messages, client + server.
 
 ![TCP Butler overview](doc/diagram.png)
 
-## Overview
+## ✨ Features
+- Persistent TCP sessions (pooled)
+- Automatic reconnect (exponential backoff)
+- Round-robin routing across connections
+- `SendAndWait` request/response with CorrelationID
+- Fire-and-forget messaging
+- Server-initiated inbound handling
 
-The library exposes a `manager` that owns a pool of TCP sessions (either outbound via `NewClientManager` or inbound via `NewServerManager`). It handles:
+## 📦 Install
 
-- Establishing and reconnecting sessions per endpoint.
-- Accepting inbound connections from one or more listeners.
-- Tracking inflight requests and matching responses by correlation ID.
-- Dispatching unsolicited inbound messages through a user-provided handler.
-- Configurable buffering, reconnect backoff, and request timeouts.
-
-You provide a `Message` type (`CorrelationID()` + `Encode()`), a `Decoder`, and any application logic you need.
-
-## Use cases
-
-### Send request and wait for response
-
-```go
-ctx := context.Background()
-mgr, _ := tcpbutler.NewClientManager(ctx, []tcpbutler.ClientEndpoint{
-    {
-        Dial:        tcpbutler.TCPDial("127.0.0.1:9000", time.Second),
-        Decoder:     myDecoder,
-        NumSessions: 2,
-    },
-})
-resp, err := mgr.SendAndWait(ctx, myMessage)
+```sh
+go get github.com/dblwhy/tcp-butler-go
 ```
 
-### Accept request and respond back
+## TCP Server Mode
+
+### Basic
 
 ```go
+package main
+
+import (
+    "context"
+    "log"
+    "github.com/you/tcpbutler"
+)
+
+func main() {
+    ctx := context.Background()
+    decoder := NewMyDecoder()
+
+    handler := func(ctx context.Context, msg tcpbutler.Message) (tcpbutler.Message, error) {
+        log.Println("server received:", msg)
+        return msg, nil // echo response
+    }
+
+    if err := tcpbutler.ListenAndServe(ctx, ":9000", decoder, handler); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+### Advanced
+
+Use when you want:
+- TLS listener
+- PROXY protocol
+- socket activation
+- cmux shared port
+- multiple servers in one process
+
+```go
+ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+defer cancel()
+
 ln, _ := net.Listen("tcp", ":9000")
-mgr, _ := tcpbutler.NewServerManager(context.Background(), ln, myDecoder)
-mgr.SetInboundHandler(func(ctx context.Context, msg tcpbutler.Message) (tcpbutler.Message, error) {
-    return handleRequest(msg)
-})
+
+m, err := tcpbutler.NewServerManager(ctx, ln, decoder)
+if err != nil { panic(err) }
+
+m.SetInboundHandler(handler)
+
+<-ctx.Done()
+m.CloseAll()
 ```
 
-### Fire-and-forget outbound
+## TCP Client Mode
 
+### Single session
 ```go
-_ = mgr.SendNoWait(ctx, msg)
+cli, err := tcpbutler.Dial(ctx, "tcp", "localhost:9000", decoder)
+if err != nil { log.Fatal(err) }
+
+resp, err := cli.SendAndWait(ctx, request)
 ```
 
-### Fire-and-forget inbound
+### Multiple sessions
 
 ```go
-mgr.SetInboundHandler(func(ctx context.Context, msg tcpbutler.Message) (tcpbutler.Message, error) {
-    go processAsync(msg)
-    return nil, nil
-})
+cli, _ := tcpbutler.DialWithSessions(ctx, "tcp", "localhost:9000", decoder, 4)
+```
+
+### With TLS/mTLS
+
+```go
+tlsConf := &tls.Config{
+    ServerName: "example.com",
+    // ...
+}
+
+cli, err := tcpbutler.DialTLS(ctx, "tcp", "example.com:443", tlsConf, decoder, 4)
+```
+
+### Accept server initiate message
+
+```go
+handler := func(ctx context.Context, msg tcpbutler.Message) (tcpbutler.Message, error) {
+    log.Println("server received:", msg)
+    return msg, nil // echo response
+}
+
+cli, err := tcpbutler.Dial(ctx, "tcp", "localhost:9000", decoder)
+if err != nil { log.Fatal(err) }
+
+cli.SetInboundHandler(handler)
+
+resp, err := cli.SendAndWait(ctx, request)
 ```
 
 ## Configuration options
@@ -66,3 +122,22 @@ mgr.SetInboundHandler(func(ctx context.Context, msg tcpbutler.Message) (tcpbutle
 | `WithRequestTimeout(d)` | `SendAndWait` timeout before failing (default 5s). |
 
 Pass these options to both `NewClientManager` and `NewServerManager` to tailor behavior per deployment.
+
+
+## 🧩 FAQ
+
+**Does it reconnect?**
+
+Yes — exponential backoff until success.
+
+**Can servers push events to clients?**
+
+Yes — inbound handler fires for unmatched messages.
+
+**How does correlation work?**
+
+CorrelationID() links outbound requests to inbound responses.
+
+**What if two sessions receive replies?**
+
+Each reply maps via correlation map → delivered automatically.
