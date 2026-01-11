@@ -27,12 +27,14 @@ func NewSlogLogger() *SlogLogger {
 	return &SlogLogger{slog.Default()}
 }
 
-// NewSlogTextLogger creates a sane default text logger to stdout.
-func NewSlogTextLogger() *SlogLogger {
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	})
-	return NewSlogLogger(handler)
+func NewSlogLoggerText(level slog.Level) *SlogLogger {
+	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	return &SlogLogger{slog.New(h)}
+}
+
+func NewSlogLoggerJSON(level slog.Level) *SlogLogger {
+	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	return &SlogLogger{slog.New(h)}
 }
 
 func (s *SlogLogger) Debug(msg string, kv ...any) { s.l.Debug(msg, kv...) }
