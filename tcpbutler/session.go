@@ -39,6 +39,8 @@ type Session struct {
 
 	inboundHandler func(*Session, Message)
 
+	log Logger
+
 	closeOnce sync.Once
 }
 
