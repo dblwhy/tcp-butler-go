@@ -23,8 +23,8 @@ type SlogLogger struct {
 	l *slog.Logger
 }
 
-func NewSlogLogger(handler slog.Handler) *SlogLogger {
-	return &SlogLogger{l: slog.New(handler)}
+func NewSlogLogger() *SlogLogger {
+	return &SlogLogger{slog.Default()}
 }
 
 // NewSlogTextLogger creates a sane default text logger to stdout.
